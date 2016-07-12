@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>通过IIO上传数据的驱动层逻辑</title>
+<link rel="stylesheet" href="https://stackedit.io/res-min/themes/base.css" />
+<script type="text/javascript" src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML"></script>
+</head>
+<body><div class="container"><p>IIO是Industrial I/O subsystem （工业IO子系统）。可以用于很多的输入，大多数是工业用途，和Input方式有所区别。 <br>
+下面是IIO支持的设备，其中imu/inv_mpu 文件夹下，就是invensense的传感器驱动。</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs rsl">    iio  
+    ├── accel             
+    ├── adc               
+    ├── addac             
+    ├── cdc               
+    ├── dac           
+    ├── dds  
+    ├── Documentation  
+    │   └── dac  
+    ├── gyro  
+    ├── impedance-analyzer  
+    ├── imu  
+    │   └── inv_mpu  
+    │       └── inv_test  
+    ├── <span class="hljs-shader"><span class="hljs-keyword">light</span>  
+    ├── magnetometer  
+    ├── meter  
+    ├── pressure  
+    ├── resolver  
+    └── trigger  </span></code></pre>
+
+<p><img src="http://img.blog.csdn.net/20160711180745576" alt="IIO结构图" title=""></p>
+
+<p>Rk3288没打补丁之前的版本，使用了Input输入输出，还没有研究，现在根据Invensense和H8使用的IIO输入输出方式总结一下rk3288补丁的驱动逻辑。</p>
+
+<p>在Linux 3.0以上版本的内核中，使用了DTS（设备树）的模式对设备进行管理。 <br>
+在驱动代码<code>inv_mpu/inv_mpu_core.c</code>中： <br>
+使用了 of_device_id 来与DTS的结点匹配</p>
+
+
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">static</span> <span class="hljs-keyword">const</span> <span class="hljs-keyword">struct</span> of_device_id inv_mpu_of_match[] = {
+    { .compatible = <span class="hljs-string">"invensense,itg3500"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu3050"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu6050"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu9150"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu6500"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu9250"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu6xxx"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu9350"</span>, },
+    { .compatible = <span class="hljs-string">"invensense,mpu6515"</span>, },
+    {}
+};</code></pre>
+
+<p>并且使用了<code>i2c_driver</code>来和驱动的处理函数进行绑定：</p>
+
+
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">static</span> <span class="hljs-keyword">struct</span> i2c_driver inv_mpu_driver = {
+    .<span class="hljs-keyword">class</span> = I2C_CLASS_HWMON,
+    .probe      =   inv_mpu_probe,
+    .remove     =   inv_mpu_remove,
+    .shutdown   =   inv_mpu_shutdown,
+    .id_table   =   inv_mpu_id,
+    .driver = {
+        .owner  =   THIS_MODULE,
+        .name   =   <span class="hljs-string">"inv-mpu-iio"</span>,
+        .pm     =       INV_MPU_PMOPS,
+        .of_match_table = of_match_ptr(inv_mpu_of_match),
+    },
+    .address_list = normal_i2c,
+};</code></pre>
+
+<p>然后再添加驱动：</p>
+
+
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">static</span> <span class="hljs-keyword">int</span> __init inv_mpu_init(<span class="hljs-keyword">void</span>)
+{
+    <span class="hljs-keyword">int</span> result = i2c_add_driver(&amp;inv_mpu_driver);
+    <span class="hljs-keyword">if</span> (result) {
+        pr_err(<span class="hljs-string">"failed\n"</span>);
+        <span class="hljs-keyword">return</span> result;
+    }
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre>
+
+<p>驱动的添加不是重点，略过，直接看<code>inv_mpu_probe</code>这个函数，这个函数相当于一次初始化，获取设备结点，初始化缓存ring等等。 <br>
+其中有函数<code>of_inv_parse_platform_data</code>函数可以读取设备结点：</p>
+
+
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">static</span> <span class="hljs-keyword">int</span> of_inv_parse_platform_data(<span class="hljs-keyword">struct</span> i2c_client *client,
+                      <span class="hljs-keyword">struct</span> mpu_platform_data *pdata)
+{
+    <span class="hljs-keyword">int</span> ret;
+    <span class="hljs-keyword">int</span> length = <span class="hljs-number">0</span>,size = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">struct</span> property *prop;
+    u32 orientation[<span class="hljs-number">9</span>];
+    <span class="hljs-keyword">int</span> orig_x,orig_y,orig_z;
+    <span class="hljs-keyword">int</span> i;
+    <span class="hljs-keyword">struct</span> device_node *np = client-&gt;dev.of_node;
+    <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">long</span> irq_flags;
+    <span class="hljs-keyword">int</span> irq_pin;
+    <span class="hljs-keyword">int</span> gpio_pin;
+    <span class="hljs-keyword">int</span> debug;
+
+    gpio_pin = of_get_named_gpio_flags(np, <span class="hljs-string">"irq-gpio"</span>, <span class="hljs-number">0</span>,(<span class="hljs-keyword">enum</span> of_gpio_flags *)&amp;irq_flags);
+    gpio_request(gpio_pin, <span class="hljs-string">"mpu6500"</span>);
+    irq_pin = gpio_to_irq(gpio_pin);
+    client-&gt;irq = irq_pin;
+    i2c_set_clientdata(client, &amp;mpu_data);
+
+        ret = of_property_read_u32(np,<span class="hljs-string">"mpu-int_config"</span>,&amp;mpu_data.int_config);
+        <span class="hljs-keyword">if</span>(ret!=<span class="hljs-number">0</span>){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get mpu-int_config error\n"</span>);
+                <span class="hljs-keyword">return</span> -EIO;
+        }
+
+        ret = of_property_read_u32(np,<span class="hljs-string">"mpu-level_shifter"</span>,&amp;mpu_data.level_shifter);
+        <span class="hljs-keyword">if</span>(ret!=<span class="hljs-number">0</span>){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get mpu-level_shifter error\n"</span>);
+                <span class="hljs-keyword">return</span> -EIO;
+        }
+
+        prop = of_find_property(np, <span class="hljs-string">"mpu-orientation"</span>, &amp;length);
+        <span class="hljs-keyword">if</span> (!prop){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get mpu-orientation length error\n"</span>);
+                <span class="hljs-keyword">return</span> -EINVAL;
+        }
+
+        size = length / <span class="hljs-keyword">sizeof</span>(u32);
+
+        <span class="hljs-keyword">if</span>((size &gt; <span class="hljs-number">0</span>)&amp;&amp;(size &lt;<span class="hljs-number">10</span>)){
+                ret = of_property_read_u32_array(np, <span class="hljs-string">"mpu-orientation"</span>,
+                                        orientation,
+                                         size);
+
+                <span class="hljs-keyword">if</span>(ret&lt;<span class="hljs-number">0</span>){
+                        dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get mpu-orientation data error\n"</span>);
+                        <span class="hljs-keyword">return</span> -EINVAL;
+                }
+        }
+        <span class="hljs-keyword">else</span>{
+                printk(<span class="hljs-string">" use default orientation\n"</span>);
+        }
+
+        <span class="hljs-keyword">for</span>(i=<span class="hljs-number">0</span>;i&lt;<span class="hljs-number">9</span>;i++)
+                mpu_data.orientation[i]= orientation[i];
+
+        ret = of_property_read_u32(np,<span class="hljs-string">"orientation-x"</span>,&amp;orig_x);
+        <span class="hljs-keyword">if</span>(ret!=<span class="hljs-number">0</span>){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get orientation-x error\n"</span>);
+                <span class="hljs-keyword">return</span> -EIO;
+        }
+
+        <span class="hljs-keyword">if</span>(orig_x&gt;<span class="hljs-number">0</span>){
+                <span class="hljs-keyword">for</span>(i=<span class="hljs-number">0</span>;i&lt;<span class="hljs-number">3</span>;i++)
+                        <span class="hljs-keyword">if</span>(mpu_data.orientation[i])
+                                mpu_data.orientation[i]=-<span class="hljs-number">1</span>;
+        }
+
+        ret = of_property_read_u32(np,<span class="hljs-string">"orientation-y"</span>,&amp;orig_y);
+        <span class="hljs-keyword">if</span>(ret!=<span class="hljs-number">0</span>){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get orientation-y error\n"</span>);
+                <span class="hljs-keyword">return</span> -EIO;
+        }
+
+        <span class="hljs-keyword">if</span>(orig_y&gt;<span class="hljs-number">0</span>){
+                <span class="hljs-keyword">for</span>(i=<span class="hljs-number">3</span>;i&lt;<span class="hljs-number">6</span>;i++)
+                        <span class="hljs-keyword">if</span>(mpu_data.orientation[i])
+                                mpu_data.orientation[i]=-<span class="hljs-number">1</span>;
+        }
+
+
+        ret = of_property_read_u32(np,<span class="hljs-string">"orientation-z"</span>,&amp;orig_z);
+        <span class="hljs-keyword">if</span>(ret!=<span class="hljs-number">0</span>){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get orientation-z error\n"</span>);
+                <span class="hljs-keyword">return</span> -EIO;
+        }
+
+        <span class="hljs-keyword">if</span>(orig_z&gt;<span class="hljs-number">0</span>){
+                <span class="hljs-keyword">for</span>(i=<span class="hljs-number">6</span>;i&lt;<span class="hljs-number">9</span>;i++)
+                        <span class="hljs-keyword">if</span>(mpu_data.orientation[i])
+                                mpu_data.orientation[i]=-<span class="hljs-number">1</span>;
+        }
+
+        ret = of_property_read_u32(np,<span class="hljs-string">"mpu-debug"</span>,&amp;debug);
+        <span class="hljs-keyword">if</span>(ret!=<span class="hljs-number">0</span>){
+                dev_err(&amp;client-&gt;dev, <span class="hljs-string">"get mpu-debug error\n"</span>);
+                <span class="hljs-keyword">return</span> -EINVAL;
+        }
+
+        <span class="hljs-keyword">if</span>(debug){
+                printk(<span class="hljs-string">"int_config=%d,level_shifter=%d,client.addr=%x,client.irq=%x\n"</span>,mpu_data.int_config, \
+                        mpu_data.level_shifter,client-&gt;addr,client-&gt;irq);
+
+                <span class="hljs-keyword">for</span>(i=<span class="hljs-number">0</span>;i&lt;size;i++)
+                        printk(<span class="hljs-string">"%d "</span>,mpu_data.orientation[i]);
+                printk(<span class="hljs-string">"\n"</span>);
+
+        }
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre>
+
+<p>DTS设备文件中的结点定义如下，可以对应着上面的函数来看一下,，其中的参数是一一对应的，以键值对的方式：</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs xml">mpu6500@68 {
+                compatible = "invensense,mpu6500";
+                reg = <span class="hljs-tag">&lt;<span class="hljs-title">0x68</span>&gt;</span>;
+                mpu-int_config = <span class="hljs-tag">&lt;<span class="hljs-title">0x10</span>&gt;</span>;
+                mpu-level_shifter = <span class="hljs-tag">&lt;<span class="hljs-title">0</span>&gt;</span>;
+                mpu-orientation = <span class="hljs-tag">&lt;<span class="hljs-title">0</span> <span class="hljs-attribute">1</span> <span class="hljs-attribute">0</span> <span class="hljs-attribute">1</span> <span class="hljs-attribute">0</span> <span class="hljs-attribute">0</span> <span class="hljs-attribute">0</span> <span class="hljs-attribute">0</span> <span class="hljs-attribute">1</span>&gt;</span>;
+                orientation-x= <span class="hljs-tag">&lt;<span class="hljs-title">1</span>&gt;</span>;
+                orientation-y= <span class="hljs-tag">&lt;<span class="hljs-title">1</span>&gt;</span>;
+                orientation-z= <span class="hljs-tag">&lt;<span class="hljs-title">1</span>&gt;</span>;
+                irq-gpio = <span class="hljs-tag">&lt;<span class="hljs-title">&amp;gpio8</span> <span class="hljs-attribute">GPIO_A2</span> <span class="hljs-attribute">IRQ_TYPE_LEVEL_LOW</span>&gt;</span>;
+                mpu-debug = <span class="hljs-tag">&lt;<span class="hljs-title">1</span>&gt;</span>;
+                status = "okay";
+        };
+sensor@0d {
+          compatible = "ak8963";
+          reg = <span class="hljs-tag">&lt;<span class="hljs-title">0x0d</span>&gt;</span>;
+          type = <span class="hljs-tag">&lt;<span class="hljs-title">SENSOR_TYPE_COMPASS</span>&gt;</span>;
+          irq-gpio = <span class="hljs-tag">&lt;<span class="hljs-title">&amp;gpio8</span> <span class="hljs-attribute">GPIO_A1</span> <span class="hljs-attribute">IRQ_TYPE_EDGE_RISING</span>&gt;</span>;
+          irq_enable = <span class="hljs-tag">&lt;<span class="hljs-title">1</span>&gt;</span>;
+          poll_delay_ms = <span class="hljs-tag">&lt;<span class="hljs-title">30</span>&gt;</span>;
+          layout = <span class="hljs-tag">&lt;<span class="hljs-title">5</span>&gt;</span>;
+          };</code></pre>
+
+<p>IIO子系统也同样是用虚拟文件的方式上报数据到user space的，这个文件的内容就是从ring（环形缓冲区）所上报的。 <br>
+于是，我们看一下ring的初始化函数<code>inv_mpu_configure_ring</code>，想来这个函数一定注册了某种机制进行数据的上报：</p>
+
+
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">int</span> inv_mpu_configure_ring(<span class="hljs-keyword">struct</span> iio_dev *indio_dev)
+{
+    <span class="hljs-keyword">int</span> ret;
+    <span class="hljs-keyword">struct</span> inv_mpu_iio_s *st = iio_priv(indio_dev);
+    <span class="hljs-keyword">struct</span> iio_buffer *ring;
+
+    ring = iio_kfifo_allocate(indio_dev);
+    <span class="hljs-keyword">if</span> (!ring)
+        <span class="hljs-keyword">return</span> -ENOMEM;
+    indio_dev-&gt;buffer = ring;
+    <span class="hljs-comment">/* setup ring buffer */</span>
+    ring-&gt;scan_timestamp = <span class="hljs-keyword">true</span>;
+    indio_dev-&gt;setup_ops = &amp;inv_mpu_ring_setup_ops;
+    <span class="hljs-comment">/*scan count double count timestamp. should subtract 1. but
+    number of channels still includes timestamp*/</span>
+    <span class="hljs-keyword">if</span> (INV_MPU3050 == st-&gt;chip_type)
+        ret = request_threaded_irq(st-&gt;client-&gt;irq, inv_irq_handler,
+            inv_read_fifo_mpu3050,
+            IRQF_TRIGGER_RISING | IRQF_SHARED, <span class="hljs-string">"inv_irq"</span>, st);
+    <span class="hljs-keyword">else</span>
+        ret = request_threaded_irq(st-&gt;client-&gt;irq, inv_irq_handler,
+            inv_read_fifo,
+            IRQF_TRIGGER_RISING | IRQF_SHARED, <span class="hljs-string">"inv_irq"</span>, st);
+    <span class="hljs-keyword">if</span> (ret)
+        <span class="hljs-keyword">goto</span> error_iio_sw_rb_free;
+
+    indio_dev-&gt;modes |= INDIO_BUFFER_TRIGGERED;
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+error_iio_sw_rb_free:
+    iio_kfifo_free(indio_dev-&gt;buffer);
+    <span class="hljs-keyword">return</span> ret;
+}</code></pre>
+
+<p>看这句语句：</p>
+
+
+
+<pre class="prettyprint"><code class="language-c hljs ">ret = request_threaded_irq(st-&gt;client-&gt;irq, inv_irq_handler,
+            inv_read_fifo,
+            IRQF_TRIGGER_RISING | IRQF_SHARED, <span class="hljs-string">"inv_irq"</span>, st);</code></pre>
+
+<p><code>request_threaded_irq</code>是Linux 2.6之后提供的一个申请中断的函数，其中第一个参数是终端号，第二个参数是硬中断处理函数（可以通过返回 IRQ_WAKE_THREADED唤醒中断线程，也可返回IRQ_HANDLE不执行中断线程），第三个是中断线程。</p>
+
+<p>直接来看中断线程<code>inv_read_fifo</code>，从名字上可以看出应该是从FIFO缓存读取数据：</p>
+
+<pre class="prettyprint"><code class=" hljs haskell">/**
+ *  inv_read_fifo() - <span class="hljs-type">Transfer</span> <span class="hljs-typedef"><span class="hljs-keyword">data</span> from <span class="hljs-type">FIFO</span> to ring buffer.</span>
+ */
+<span class="hljs-title">irqreturn_t</span> inv_read_fifo(int irq, void *dev_id)
+{
+
+    struct inv_mpu_iio_s *st = (struct inv_mpu_iio_s *)dev_id;
+    struct iio_dev *indio_dev = iio_priv_to_dev(st);
+    size_t bytes_per_datum;
+    int result;
+    u8 <span class="hljs-typedef"><span class="hljs-keyword">data</span>[<span class="hljs-type">BYTES_FOR_DMP</span> + <span class="hljs-type">QUATERNION_BYTES</span>];</span>
+    u16 fifo_count;
+    u32 copied;
+    s64 timestamp;
+    struct inv_reg_map_s *reg;
+    s64 buf[<span class="hljs-number">8</span>];
+    s8 *tmp;
+
+    int64_t tm_i2c_sum = <span class="hljs-number">0</span>;
+    int64_t tm = <span class="hljs-number">0</span>;
+    int64_t tm_begin, tm_end;
+
+//  unsigned long flags;
+    tm_begin = get_time_ns();
+
+//  local_irq_save(flags);
+//  preempt_disable();
+
+    mutex_lock(&amp;indio_dev-&gt;mlock);
+
+    <span class="hljs-keyword">if</span> (!(iio_buffer_enabled(indio_dev)))
+        goto end_session;
+
+    reg = &amp;st-&gt;reg;
+    <span class="hljs-keyword">if</span> (!(st-&gt;chip_config.accl_fifo_enable |
+        st-&gt;chip_config.gyro_fifo_enable |
+        st-&gt;chip_config.dmp_on |
+        st-&gt;chip_config.compass_fifo_enable |
+        st-&gt;mot_int.mot_on))
+        goto end_session;
+    <span class="hljs-keyword">if</span> (st-&gt;mot_int.mot_on)
+        inv_process_motion(st);
+    <span class="hljs-keyword">if</span> (st-&gt;chip_config.dmp_on &amp;&amp; st-&gt;chip_config.smd_enable) {
+        /* dmp interrupt status */
+        result = inv_i2c_read(st, <span class="hljs-type">REG_DMP_INT_STATUS</span>, <span class="hljs-number">1</span>, <span class="hljs-typedef"><span class="hljs-keyword">data</span>);</span>
+        <span class="hljs-keyword">if</span> (!result)
+            <span class="hljs-keyword">if</span> (<span class="hljs-typedef"><span class="hljs-keyword">data</span>[0] &amp; <span class="hljs-type">SMD_INT_ON</span>) <span class="hljs-container">{
+                <span class="hljs-title">sysfs_notify</span>(&amp;<span class="hljs-title">indio_dev</span>-&gt;<span class="hljs-title">dev</span>.<span class="hljs-title">kobj</span>, <span class="hljs-type">NULL</span>,
+                        "<span class="hljs-title">event_smd</span>");
+                <span class="hljs-title">st</span>-&gt;<span class="hljs-title">chip_config</span>.<span class="hljs-title">smd_enable</span> = 0;
+            }</span></span>
+    }
+    <span class="hljs-keyword">if</span> (st-&gt;chip_config.lpa_mode) {
+        result = inv_i2c_read(st, reg-&gt;raw_accl,
+                      <span class="hljs-type">BYTES_PER_SENSOR</span>, <span class="hljs-typedef"><span class="hljs-keyword">data</span>);</span>
+        <span class="hljs-keyword">if</span> (result)
+            goto end_session;
+        inv_report_gyro_accl_compass(indio_dev, <span class="hljs-typedef"><span class="hljs-keyword">data</span>,</span>
+                         get_time_ns());
+        goto end_session;
+    }
+    bytes_per_datum = get_bytes_per_datum(st);
+    fifo_count = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">if</span> (bytes_per_datum != <span class="hljs-number">0</span>) {
+        tm = get_time_ns();
+        result = inv_i2c_read(st, reg-&gt;fifo_count_h,
+                <span class="hljs-type">FIFO_COUNT_BYTE</span>, <span class="hljs-typedef"><span class="hljs-keyword">data</span>);</span>
+        tm_i2c_sum += get_time_ns()-tm;
+        <span class="hljs-keyword">if</span> (result)
+            goto end_session;
+        fifo_count = be16_to_cpup((__be16 *)(&amp;<span class="hljs-typedef"><span class="hljs-keyword">data</span>[0]));</span>
+        <span class="hljs-keyword">if</span> (fifo_count == <span class="hljs-number">0</span>)
+            goto flush_fifo;
+        <span class="hljs-keyword">if</span> (fifo_count &lt; bytes_per_datum)
+            goto end_session;
+        /* fifo count can't be odd number */
+        <span class="hljs-keyword">if</span> (fifo_count &amp; <span class="hljs-number">1</span>)
+            goto flush_fifo;
+        <span class="hljs-keyword">if</span> (fifo_count &gt;  <span class="hljs-type">FIFO_THRESHOLD</span>)
+            goto flush_fifo;
+        /* timestamp mismatch. */
+        <span class="hljs-keyword">if</span> (kfifo_len(&amp;st-&gt;timestamps) &lt;
+            fifo_count / bytes_per_datum)
+            goto flush_fifo;
+        <span class="hljs-keyword">if</span> (kfifo_len(&amp;st-&gt;timestamps) &gt;
+            fifo_count / bytes_per_datum + <span class="hljs-type">TIME_STAMP_TOR</span>) {
+            <span class="hljs-keyword">if</span> (st-&gt;chip_config.dmp_on) {
+                result = kfifo_to_user(&amp;st-&gt;timestamps,
+                &amp;timestamp, sizeof(timestamp), &amp;copied);
+                <span class="hljs-keyword">if</span> (result)
+                    goto flush_fifo;
+            } <span class="hljs-keyword">else</span> {
+                goto flush_fifo;
+            }
+        }
+    } <span class="hljs-keyword">else</span> {
+        result = kfifo_to_user(&amp;st-&gt;timestamps,
+            &amp;timestamp, sizeof(timestamp), &amp;copied);
+        <span class="hljs-keyword">if</span> (result)
+            goto flush_fifo;
+    }
+    tmp = (s8 *)buf;
+    while ((bytes_per_datum != <span class="hljs-number">0</span>) &amp;&amp; (fifo_count &gt;= bytes_per_datum)) {
+        tm = get_time_ns();
+        result = inv_i2c_read(st, reg-&gt;fifo_r_w, bytes_per_datum,
+            <span class="hljs-typedef"><span class="hljs-keyword">data</span>);</span>
+        tm_i2c_sum += get_time_ns()-tm;
+        <span class="hljs-keyword">if</span> (result)
+            goto flush_fifo;
+
+        result = kfifo_to_user(&amp;st-&gt;timestamps,
+            &amp;timestamp, sizeof(timestamp), &amp;copied);
+        <span class="hljs-keyword">if</span> (result)
+            goto flush_fifo;
+        inv_report_gyro_accl_compass(indio_dev, <span class="hljs-typedef"><span class="hljs-keyword">data</span>, timestamp);</span>
+        fifo_count -= bytes_per_datum;
+    }
+    <span class="hljs-keyword">if</span> (bytes_per_datum == <span class="hljs-number">0</span> &amp;&amp; st-&gt;chip_config.compass_fifo_enable)
+        inv_report_gyro_accl_compass(indio_dev, <span class="hljs-typedef"><span class="hljs-keyword">data</span>, timestamp);</span>
+
+<span class="hljs-title">end_session</span>:
+    mutex_unlock(&amp;indio_dev-&gt;mlock);
+//  local_irq_restore(flags);
+//  preempt_enable();
+
+    tm_end = get_time_ns();
+//  <span class="hljs-keyword">if</span> (tm_end-tm_begin &gt; <span class="hljs-number">700000</span>)
+//      pr_info(<span class="hljs-string">"%s: [%lld] %lld %lld %lld\n"</span>, __func__, timestamp, tm_begin-timestamp, tm_i2c_sum, tm_end-tm_begin);
+
+    return <span class="hljs-type">IRQ_HANDLED</span>;
+
+<span class="hljs-title">flush_fifo</span>:
+    /* <span class="hljs-type">Flush</span> <span class="hljs-type">HW</span> and <span class="hljs-type">SW</span> <span class="hljs-type">FIFOs</span>. */
+    inv_reset_fifo(indio_dev);
+    inv_clear_kfifo(st);
+    mutex_unlock(&amp;indio_dev-&gt;mlock);
+
+    return <span class="hljs-type">IRQ_HANDLED</span>;
+}</code></pre>
+
+<p>注释说明了，这是从FIFO缓存读数据到iio的ring缓冲区</p>
+
+<pre class="prettyprint"><code class="language-c hljs ">result = inv_i2c_read(st, reg-&gt;fifo_r_w, bytes_per_datum,data);</code></pre>
+
+<p>这句话就是关键语句，reg-&gt;fifo_r_w就是FIFO寄存器的地址（这个寄存器用处从FIFO缓冲区读取输出，FIFO的大小有512字节，按照各种标志位存有原始数据），bytes_per_datum是大小，data就是读出来的数据。</p>
+
+<p>之后用了<code>inv_report_gyro_accl_compass(indio_dev, data, timestamp);</code>对数据进行上报。</p>
+
+<pre class="prettyprint"><code class=" hljs perl">static <span class="hljs-keyword">int</span> inv_report_gyro_accl_compass(struct iio_dev <span class="hljs-variable">*indio_dev</span>,
+                    u8 <span class="hljs-variable">*data</span>, s64 t)
+{
+    struct inv_mpu_iio_s <span class="hljs-variable">*st</span> = iio_priv(indio_dev);
+    short g[THREE_AXIS], a[THREE_AXIS], c[THREE_AXIS];
+    <span class="hljs-keyword">int</span> <span class="hljs-string">q[4]</span>;
+    <span class="hljs-keyword">int</span> result, ind;
+    u32 word;
+    u8 d[<span class="hljs-number">8</span>], compass_divider;
+    u8 buf[<span class="hljs-number">64</span>];
+    u64 <span class="hljs-variable">*tmp</span>;
+    <span class="hljs-keyword">int</span> source, i;
+    struct inv_chip_config_s <span class="hljs-variable">*conf</span>;
+
+    conf = &amp;st-&gt;chip_config;
+    ind = <span class="hljs-number">0</span>;
+
+    <span class="hljs-keyword">if</span> (conf-&gt;quaternion_on &amp; conf-&gt;dmp_on) {
+        <span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt; ARRAY_SIZE(<span class="hljs-keyword">q</span>); i++) {
+            <span class="hljs-string">q[i]</span> = be32_to_cpup((__be32 <span class="hljs-variable">*)</span>(&amp;data[ind + i * <span class="hljs-number">4</span>]));
+            st-&gt;raw_quaternion[i] = <span class="hljs-string">q[i]</span>;
+            memcpy(&amp;buf[ind + i * sizeof(<span class="hljs-string">q[i]</span>)], &amp;<span class="hljs-string">q[i]</span>,
+                        sizeof(<span class="hljs-string">q[i]</span>));
+        }
+        ind += QUATERNION_BYTES;
+    }
+
+    <span class="hljs-keyword">if</span> (conf-&gt;accl_fifo_enable) {
+        <span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt; ARRAY_SIZE(a); i++) {
+            a[i] = be16_to_cpup((__be16 <span class="hljs-variable">*)</span>(&amp;data[ind + i * <span class="hljs-number">2</span>]));
+            memcpy(&amp;buf[ind + i * sizeof(a[i])], &amp;a[i],
+                        sizeof(a[i]));
+        }
+        ind += BYTES_PER_SENSOR;
+    }
+
+    <span class="hljs-keyword">if</span> (conf-&gt;gyro_fifo_enable) {
+        <span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt; ARRAY_SIZE(g); i++) {
+            g[i] = be16_to_cpup((__be16 <span class="hljs-variable">*)</span>(&amp;data[ind + i * <span class="hljs-number">2</span>]));
+            memcpy(&amp;buf[ind + i * sizeof(g[i])], &amp;g[i],
+                        sizeof(g[i]));
+        }
+        ind += BYTES_PER_SENSOR;
+    }
+
+    <span class="hljs-keyword">if</span> (conf-&gt;dmp_on &amp;&amp; (conf-&gt;tap_on || conf-&gt;display_orient_on)) {
+        word = (u32)(be32_to_cpup((u32 <span class="hljs-variable">*)</span>&amp;data[ind]));
+        source = ((word &gt;&gt; <span class="hljs-number">16</span>) &amp; <span class="hljs-number">0xff</span>);
+        <span class="hljs-keyword">if</span> (source) {
+            st-&gt;tap_data = (DMP_MASK_TAP &amp; (word &amp; <span class="hljs-number">0xff</span>));
+            st-&gt;display_orient_data =
+            ((DMP_MASK_DIS_ORIEN &amp; (word &amp; <span class="hljs-number">0xff</span>)) &gt;&gt;
+              DMP_DIS_ORIEN_SHIFT);
+        }
+
+        /* report tap information <span class="hljs-variable">*/</span>
+        <span class="hljs-keyword">if</span> (source &amp; INT_SRC_TAP)
+            sysfs_notify(&amp;indio_dev-&gt;dev.kobj, NULL, <span class="hljs-string">"event_tap"</span>);
+        <span class="hljs-regexp">/* report orientation information */</span>
+        <span class="hljs-keyword">if</span> (source &amp; INT_SRC_DISPLAY_ORIENT)
+            sysfs_notify(&amp;indio_dev-&gt;dev.kobj, NULL,
+                     <span class="hljs-string">"event_display_orientation"</span>);
+    }
+    /<span class="hljs-variable">*divider</span> <span class="hljs-keyword">and</span> counter is used to decrease the speed of <span class="hljs-keyword">read</span> in
+        high frequency sample rate<span class="hljs-variable">*/</span>
+    <span class="hljs-keyword">if</span> (conf-&gt;compass_fifo_enable) {
+<span class="hljs-comment">#if 1</span>
+        c[<span class="hljs-number">0</span>] = g_akm_mag[<span class="hljs-number">0</span>];
+        c[<span class="hljs-number">1</span>] = g_akm_mag[<span class="hljs-number">1</span>];
+        c[<span class="hljs-number">2</span>] = g_akm_mag[<span class="hljs-number">2</span>];
+<span class="hljs-comment">#else</span>
+        c[<span class="hljs-number">0</span>] = <span class="hljs-number">0</span>;
+        c[<span class="hljs-number">1</span>] = <span class="hljs-number">0</span>;
+        c[<span class="hljs-number">2</span>] = <span class="hljs-number">0</span>;
+        <span class="hljs-keyword">if</span> (conf-&gt;dmp_on)
+            compass_divider = st-&gt;compass_dmp_divider;
+        <span class="hljs-keyword">else</span>
+            compass_divider = st-&gt;compass_divider;
+
+        <span class="hljs-keyword">if</span> (compass_divider &lt;= st-&gt;compass_counter) {
+            <span class="hljs-regexp">/*read from external sensor data register */</span>
+            result = inv_i2c_read(st, REG_EXT_SENS_DATA_0<span class="hljs-number">0</span>,
+                          NUM_BYTES_COMPASS_SLAVE, d);
+            <span class="hljs-regexp">/* d[7] is status 2 register */</span>
+            /<span class="hljs-variable">*for</span> AKM8975, bit <span class="hljs-number">2</span> <span class="hljs-keyword">and</span> <span class="hljs-number">3</span> should be all be zero<span class="hljs-variable">*/</span>
+            /* <span class="hljs-keyword">for</span> AMK8963, bit <span class="hljs-number">3</span> should be zero<span class="hljs-variable">*/</span>
+            <span class="hljs-keyword">if</span> ((DATA_AKM_DRDY == d[<span class="hljs-number">0</span>]) &amp;&amp;
+                (<span class="hljs-number">0</span> == (d[<span class="hljs-number">7</span>] &amp; DATA_AKM_STAT_MASK)) &amp;&amp;
+                (!result)) {
+                u8 <span class="hljs-variable">*sens</span>;
+                sens = st-&gt;chip_info.compass_sens;
+                c[<span class="hljs-number">0</span>] = (short)((d[<span class="hljs-number">2</span>] &lt;&lt; <span class="hljs-number">8</span>) | d[<span class="hljs-number">1</span>]);
+                c[<span class="hljs-number">1</span>] = (short)((d[<span class="hljs-number">4</span>] &lt;&lt; <span class="hljs-number">8</span>) | d[<span class="hljs-number">3</span>]);
+                c[<span class="hljs-number">2</span>] = (short)((d[<span class="hljs-number">6</span>] &lt;&lt; <span class="hljs-number">8</span>) | d[<span class="hljs-number">5</span>]);
+                c[<span class="hljs-number">0</span>] = (short)(((<span class="hljs-keyword">int</span>)c[<span class="hljs-number">0</span>] *
+                           (sens[<span class="hljs-number">0</span>] + <span class="hljs-number">128</span>)) &gt;&gt; <span class="hljs-number">8</span>);
+                c[<span class="hljs-number">1</span>] = (short)(((<span class="hljs-keyword">int</span>)c[<span class="hljs-number">1</span>] *
+                           (sens[<span class="hljs-number">1</span>] + <span class="hljs-number">128</span>)) &gt;&gt; <span class="hljs-number">8</span>);
+                c[<span class="hljs-number">2</span>] = (short)(((<span class="hljs-keyword">int</span>)c[<span class="hljs-number">2</span>] *
+                           (sens[<span class="hljs-number">2</span>] + <span class="hljs-number">128</span>)) &gt;&gt; <span class="hljs-number">8</span>);
+                c[<span class="hljs-number">0</span>] ^= (short)t;
+                c[<span class="hljs-number">1</span>] ^= (short)t;
+                c[<span class="hljs-number">2</span>] ^= (short)t;
+                st-&gt;raw_compass[<span class="hljs-number">0</span>] = c[<span class="hljs-number">0</span>];
+                st-&gt;raw_compass[<span class="hljs-number">1</span>] = c[<span class="hljs-number">1</span>];
+                st-&gt;raw_compass[<span class="hljs-number">2</span>] = c[<span class="hljs-number">2</span>];
+            }
+            st-&gt;compass_counter = <span class="hljs-number">0</span>;
+        } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (compass_divider != <span class="hljs-number">0</span>) {
+            <span class="hljs-regexp">//st</span>-&gt;compass_counter++;
+        }
+<span class="hljs-comment">#endif</span>
+
+        <span class="hljs-keyword">if</span> (!conf-&gt;normal_compass_measure) {
+            c[<span class="hljs-number">0</span>] = <span class="hljs-number">0</span>;
+            c[<span class="hljs-number">1</span>] = <span class="hljs-number">0</span>;
+            c[<span class="hljs-number">2</span>] = <span class="hljs-number">0</span>;
+            conf-&gt;normal_compass_measure = <span class="hljs-number">1</span>;
+        }
+        <span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt; <span class="hljs-number">3</span>; i++)
+            memcpy(&amp;buf[ind + i * sizeof(c[i])], &amp;c[i],
+                        sizeof(c[i]));
+
+        ind += BYTES_PER_SENSOR;
+    }
+    tmp = (u64 <span class="hljs-variable">*)</span>buf;
+    tmp[DIV_ROUND_UP(ind, <span class="hljs-number">8</span>)] = t;
+
+    <span class="hljs-keyword">if</span> (ind &gt; <span class="hljs-number">0</span>) {
+<span class="hljs-regexp">//</span>      new_tm(t, &amp;test_delay[DELAY_STAT_REPORT], <span class="hljs-string">"MPU KRNL report"</span>);
+
+        int64_t tm_cur = get_time_ns();
+        int64_t tm_delta = tm_cur - t;
+        <span class="hljs-keyword">if</span> (tm_min==<span class="hljs-number">0</span> &amp;&amp; tm_max==<span class="hljs-number">0</span>)
+            tm_min = tm_max = tm_delta;
+        <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (tm_delta &lt; tm_min)
+            tm_min = tm_delta;
+        <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (tm_delta &gt; tm_max)
+            tm_max = tm_delta;
+        tm_sum += tm_delta;
+        tm_count++;
+
+        <span class="hljs-keyword">if</span> (unlikely((tm_cur-tm_last_print) &gt;= <span class="hljs-number">1000000000</span>)) {
+<span class="hljs-regexp">//</span>          pr_info(<span class="hljs-string">"MPU6050 report size: <span class="hljs-variable">%d</span> rate: <span class="hljs-variable">%lld</span>\n"</span>, ind, tm_count);
+<span class="hljs-regexp">//</span>          pr_info(<span class="hljs-string">"MPU KRNL report: [<span class="hljs-variable">%lld</span>] <span class="hljs-variable">%lld</span>,<span class="hljs-variable">%d</span>,<span class="hljs-variable">%lld</span>\n"</span>, t, tm_min, (u32)tm_sum/(u32)tm_count, tm_max);
+            tm_last_print = tm_cur;
+            tm_min = tm_max = tm_count = tm_sum = <span class="hljs-number">0</span>;
+        }
+
+<span class="hljs-comment">#ifdef INV_KERNEL_3_10</span>
+            iio_push_to_buffers(indio_dev, buf);
+<span class="hljs-comment">#else</span>
+        iio_push_to_buffer(indio_dev-&gt;buffer, buf, t);
+<span class="hljs-comment">#endif</span>
+//      pr_info(<span class="hljs-string">"MPU KERL report: tm=<span class="hljs-variable">%lld</span>, <span class="hljs-variable">%lld</span>, <span class="hljs-variable">%lld</span>\n"</span>, t, tm, tm-t);
+    }
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre>
+
+<p>这个函数根据MPU芯片的标志位，对数据进行了解析。最后使用<code>iio_push_to_buffers(indio_dev, buf);</code>把数据送至IIO设备的缓存，IIO子系统会把该数据通过虚拟文件系统进行上报。</p>
+
+
+
+<h1 id="小结驱动层没有对原始的数据进行改动直接进行上报rk288对数据的改动应该在hal进行">小结：驱动层没有对原始的数据进行改动，直接进行上报，rk288对数据的改动应该在HAL进行。</h1>
+
+<p><img src="http://img.blog.csdn.net/20160712115452488" alt="Driver流程图" title=""></p></div></body>
+</html>

@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SensorHAL层</title>
+<link rel="stylesheet" href="https://stackedit.io/res-min/themes/base.css" />
+<script type="text/javascript" src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML"></script>
+</head>
+<body><div class="container"><p>sensors_mpl.c的<code>pollEvent</code>函数，是SensorDevice的poll的实现。</p>
+
+<p>其中有<code>readEvent</code>函数，是获取传感器event事件的具体函数。 <br>
+<code>readEvent</code>函数中，有<code>CALL_MEMBER_FN</code>的宏定义，是一个handler的指针。</p>
+
+<pre class="prettyprint"><code class=" hljs sql"> <span class="hljs-operator"><span class="hljs-keyword">update</span> = CALL_MEMBER_FN(this, mHandlers[i])(mPendingEvents + i);</span></code></pre>
+
+<p>以<code>rawGyroHandler</code>为例子，这是原始陀螺仪数据的handler方法。</p>
+
+<pre class="prettyprint"><code class=" hljs haskell"><span class="hljs-title">int</span> <span class="hljs-type">MPLSensor</span>::rawGyroHandler(sensors_event_t* s)
+{
+    <span class="hljs-type">VHANDLER_LOG</span>;
+    int update;
+<span class="hljs-preprocessor">#if defined ANDROID_LOLLIPOP</span>
+    update = inv_get_sensor_type_gyroscope_raw(s-&gt;uncalibrated_gyro.uncalib,
+                                               &amp;s-&gt;gyro.status, (inv_time_t *)(&amp;s-&gt;timestamp));
+<span class="hljs-preprocessor">#else</span>
+    update = inv_get_sensor_type_gyroscope_raw(s-&gt;uncalibrated_gyro.uncalib,
+                                               &amp;s-&gt;gyro.status, &amp;s-&gt;timestamp);
+<span class="hljs-preprocessor">#endif</span>
+    <span class="hljs-keyword">if</span>(update) {
+        memcpy(s-&gt;uncalibrated_gyro.bias, mGyroBias, sizeof(mGyroBias));
+        <span class="hljs-type">LOGV_IF</span>(<span class="hljs-type">HANDLER_DATA</span>,<span class="hljs-string">"HAL:gyro bias data : %+f %+f %+f -- %lld - %d"</span>,
+            s-&gt;uncalibrated_gyro.bias[<span class="hljs-number">0</span>], s-&gt;uncalibrated_gyro.bias[<span class="hljs-number">1</span>],
+            s-&gt;uncalibrated_gyro.bias[<span class="hljs-number">2</span>], s-&gt;timestamp, update);
+    }
+    s-&gt;gyro.status = <span class="hljs-type">SENSOR_STATUS_UNRELIABLE</span>;
+    <span class="hljs-type">LOGV_IF</span>(<span class="hljs-type">HANDLER_DATA</span>, <span class="hljs-string">"HAL:raw gyro data : %+f %+f %+f -- %lld - %d"</span>,
+            s-&gt;uncalibrated_gyro.uncalib[<span class="hljs-number">0</span>], s-&gt;uncalibrated_gyro.uncalib[<span class="hljs-number">1</span>],
+            s-&gt;uncalibrated_gyro.uncalib[<span class="hljs-number">2</span>], s-&gt;timestamp, update);
+    return update;
+}</code></pre>
+
+<p>上诉代码中，通过<code>inv_get_sensor_type_gyroscope_raw</code>函数获得了未校准的陀螺仪数据。并根据是否获取到bias的值输出log。</p>
+
+<p><code>inv_get_sensor_type_gyroscope_raw</code>的实现如下：</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs java"><span class="hljs-javadoc">/** Gyroscope raw data (rad/s) in body frame.
+*<span class="hljs-javadoctag"> @param</span>[out] values Rotation Rate in rad/sec.
+*<span class="hljs-javadoctag"> @param</span>[out] accuracy Accuracy of the measurment, 0 is least accurate,
+*                      while 3 is most accurate.
+*<span class="hljs-javadoctag"> @param</span>[out] timestamp The timestamp for this sensor. Derived from the
+*                       timestamp sent to inv_build_gyro().
+*<span class="hljs-javadoctag"> @return</span>     Returns 1 if the data was updated or 0 if it was not updated.
+*/</span>
+<span class="hljs-keyword">int</span> inv_get_sensor_type_gyroscope_raw(<span class="hljs-keyword">float</span> *values, int8_t *accuracy,
+                                   inv_time_t * timestamp)
+{
+    <span class="hljs-keyword">long</span> gyro[<span class="hljs-number">3</span>];
+    <span class="hljs-keyword">int</span> status;
+
+    inv_get_gyro_set_raw(gyro, accuracy, timestamp);
+    values[<span class="hljs-number">0</span>] = gyro[<span class="hljs-number">0</span>] * GYRO_CONVERSION;
+    values[<span class="hljs-number">1</span>] = gyro[<span class="hljs-number">1</span>] * GYRO_CONVERSION;
+    values[<span class="hljs-number">2</span>] = gyro[<span class="hljs-number">2</span>] * GYRO_CONVERSION;
+    <span class="hljs-keyword">if</span> (hal_out.gyro_status &amp; INV_NEW_DATA)
+        status = <span class="hljs-number">1</span>;
+    <span class="hljs-keyword">else</span>
+        status = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">return</span> status;
+}</code></pre>
+
+<p>根据注释可以看出，这个函数返回了以机身为坐标的陀螺仪原始数据。</p>
+
+<p>其中的核心代码就是<code>inv_get_gyro_set_raw</code>函数，下面进去<code>inv_get_gyro_set_raw</code>查看，代码如下：</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs java"><span class="hljs-javadoc">/** Gets a whole set of gyro raw data including data, accuracy and timestamp.
+ *<span class="hljs-javadoctag"> @param</span>[out] data Gyro Data where 1 dps = 2^16
+ *<span class="hljs-javadoctag"> @param</span>[out] accuracy Accuracy 0 being not accurate, and 3 being most accurate.
+ *<span class="hljs-javadoctag"> @param</span>[out] timestamp The timestamp of the data sample.
+*/</span>
+<span class="hljs-keyword">void</span> inv_get_gyro_set_raw(<span class="hljs-keyword">long</span> *data, int8_t *accuracy, inv_time_t *timestamp)
+{
+    memcpy(data, sensors.gyro.raw_scaled, sizeof(sensors.gyro.raw_scaled));
+    <span class="hljs-keyword">if</span> (timestamp != NULL) {
+        *timestamp = sensors.gyro.timestamp;
+    }
+    <span class="hljs-keyword">if</span> (accuracy != NULL) {
+        *accuracy = <span class="hljs-number">0</span>;
+    }
+}</code></pre>
+
+<p>这个函数就是返回了一个<code>sensors.gyro.raw_scaled</code>的数据结构以及时间戳与精度。 <br>
+sensors的结构如下：</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs java">struct inv_sensor_cal_t {
+    struct inv_single_sensor_t gyro;
+    struct inv_single_sensor_t accel;
+    struct inv_single_sensor_t compass;
+    struct inv_single_sensor_t temp;
+    struct inv_quat_sensor_t quat;
+    struct inv_soft_iron_t soft_iron;
+    <span class="hljs-javadoc">/** Combinations of INV_GYRO_NEW, INV_ACCEL_NEW, INV_MAG_NEW to indicate
+    * which data is a new sample as these data points may have different sample rates.
+    */</span>
+    <span class="hljs-keyword">int</span> status;
+};</code></pre>
+
+<p>gyro的结构如下：</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs java">struct inv_single_sensor_t {
+    <span class="hljs-javadoc">/** Orientation Descriptor. Describes how to go from the mounting frame to the body frame when
+    * the rotation matrix could be thought of only having elements of 0,1,-1.
+    * 2 bits are used to describe the column of the 1 or -1 and the 3rd bit is used for the sign.
+    * Bit 8 is sign of +/- 1 in third row. Bit 6-7 is column of +/-1 in third row.
+    * Bit 5 is sign of +/- 1 in second row. Bit 3-4 is column of +/-1 in second row.
+    * Bit 2 is sign of +/- 1 in first row. Bit 0-1 is column of +/-1 in first row.
+    */</span>
+    <span class="hljs-keyword">int</span> orientation;
+    <span class="hljs-javadoc">/** The raw data in raw data units in the mounting frame */</span>
+    <span class="hljs-keyword">short</span> raw[<span class="hljs-number">3</span>];
+    <span class="hljs-javadoc">/** Raw data in body frame */</span>
+    <span class="hljs-keyword">long</span> raw_scaled[<span class="hljs-number">3</span>];
+    <span class="hljs-javadoc">/** Calibrated data */</span>
+    <span class="hljs-keyword">long</span> calibrated[<span class="hljs-number">3</span>];
+    <span class="hljs-keyword">long</span> sensitivity;
+    <span class="hljs-javadoc">/** Sample rate in microseconds */</span>
+    <span class="hljs-keyword">long</span> sample_rate_us;
+    <span class="hljs-keyword">long</span> sample_rate_ms;
+    <span class="hljs-javadoc">/** INV_CONTIGUOUS is set for contiguous data. Will not be set if there was a sample
+    * skipped due to power savings turning off this sensor.
+    * INV_NEW_DATA set for a new set of data, cleared if not available.
+    * INV_CALIBRATED_SET if calibrated data has been solved for */</span>
+    <span class="hljs-keyword">int</span> status;
+    <span class="hljs-javadoc">/** 0 to 3 for how well sensor data and biases are known. 3 is most accurate. */</span>
+    <span class="hljs-keyword">int</span> accuracy;
+    inv_time_t timestamp;
+    inv_time_t timestamp_prev;
+    <span class="hljs-javadoc">/** Bandwidth in Hz */</span>
+    <span class="hljs-keyword">int</span> bandwidth;
+};</code></pre>
+
+<p>从注释可以看出，<code>sensors.gyro.raw_scaled</code>的数据就是机身的陀螺仪原始数据。那这个数据是从哪里来的，看下面的函数：</p>
+
+
+
+<pre class="prettyprint"><code class=" hljs java"><span class="hljs-javadoc">/** Takes raw data stored in the sensor, removes bias, and converts it to
+* calibrated data in the body frame. Also store raw data for body frame.
+*<span class="hljs-javadoctag"> @param</span>[in,out] sensor structure to modify
+*<span class="hljs-javadoctag"> @param</span>[in] bias bias in the mounting frame, in hardware units scaled by
+*                 2^16. Length 3.
+*/</span>
+<span class="hljs-keyword">void</span> inv_apply_calibration(struct inv_single_sensor_t *sensor, <span class="hljs-keyword">const</span> <span class="hljs-keyword">long</span> *bias)
+{
+    <span class="hljs-keyword">long</span> raw32[<span class="hljs-number">3</span>];
+
+    <span class="hljs-comment">// Convert raw to calibrated</span>
+    raw32[<span class="hljs-number">0</span>] = (<span class="hljs-keyword">long</span>)sensor-&gt;raw[<span class="hljs-number">0</span>] &lt;&lt; <span class="hljs-number">15</span>;
+    raw32[<span class="hljs-number">1</span>] = (<span class="hljs-keyword">long</span>)sensor-&gt;raw[<span class="hljs-number">1</span>] &lt;&lt; <span class="hljs-number">15</span>;
+    raw32[<span class="hljs-number">2</span>] = (<span class="hljs-keyword">long</span>)sensor-&gt;raw[<span class="hljs-number">2</span>] &lt;&lt; <span class="hljs-number">15</span>;
+
+    inv_convert_to_body_with_scale(sensor-&gt;orientation, sensor-&gt;sensitivity &lt;&lt; <span class="hljs-number">1</span>, raw32, sensor-&gt;raw_scaled);
+
+    raw32[<span class="hljs-number">0</span>] -= bias[<span class="hljs-number">0</span>] &gt;&gt; <span class="hljs-number">1</span>;
+    raw32[<span class="hljs-number">1</span>] -= bias[<span class="hljs-number">1</span>] &gt;&gt; <span class="hljs-number">1</span>;
+    raw32[<span class="hljs-number">2</span>] -= bias[<span class="hljs-number">2</span>] &gt;&gt; <span class="hljs-number">1</span>;
+
+    inv_convert_to_body_with_scale(sensor-&gt;orientation, sensor-&gt;sensitivity &lt;&lt; <span class="hljs-number">1</span>, raw32, sensor-&gt;calibrated);
+
+    sensor-&gt;status |= INV_CALIBRATED;
+}</code></pre>
+
+<p>注释说明了将陀螺仪原始数据储存在一个<code>inv_single_sensor_t</code>的结构体中，消除偏差，并且转换成机身的校准数据，同时，未校准数据也储存下来。这个函数中输入和输出都是snesors这个结构体，<code>inv_convert_to_body_with_scale</code>函数是核心的转换函数，第一个函数的输出是<code>sensor-&gt;raw_scaled</code>,原始数据。之后减去bias偏差，并再次使用<code>inv_convert_to_body_with_scale</code>函数转换输出到<code>sensor-&gt;calibrated</code>中储存。</p>
+
+<p>下面看一下<code>inv_convert_to_body_with_scale</code>函数做了些什么：</p>
+
+<pre class="prettyprint"><code class=" hljs java"><span class="hljs-javadoc">/** Uses the scalar orientation value to convert from chip frame to body frame and
+* apply appropriate scaling.
+*<span class="hljs-javadoctag"> @param</span>[in] orientation A scalar that represent how to go from chip to body frame
+*<span class="hljs-javadoctag"> @param</span>[in] sensitivity Sensitivity scale
+*<span class="hljs-javadoctag"> @param</span>[in] input Input vector, length 3
+*<span class="hljs-javadoctag"> @param</span>[out] output Output vector, length 3
+*/</span>
+<span class="hljs-keyword">void</span> inv_convert_to_body_with_scale(unsigned <span class="hljs-keyword">short</span> orientation, <span class="hljs-keyword">long</span> sensitivity, <span class="hljs-keyword">const</span> <span class="hljs-keyword">long</span> *input, <span class="hljs-keyword">long</span> *output)
+{
+    output[<span class="hljs-number">0</span>] = inv_q30_mult(input[orientation &amp; <span class="hljs-number">0x03</span>] *
+                             SIGNSET(orientation &amp; <span class="hljs-number">0x004</span>), sensitivity);
+    output[<span class="hljs-number">1</span>] = inv_q30_mult(input[(orientation&gt;&gt;<span class="hljs-number">3</span>) &amp; <span class="hljs-number">0x03</span>] *
+                             SIGNSET(orientation &amp; <span class="hljs-number">0x020</span>), sensitivity);
+    output[<span class="hljs-number">2</span>] = inv_q30_mult(input[(orientation&gt;&gt;<span class="hljs-number">6</span>) &amp; <span class="hljs-number">0x03</span>] *
+                             SIGNSET(orientation &amp; <span class="hljs-number">0x100</span>), sensitivity);
+}</code></pre>
+
+<p>该函数用一个scalar orientation计算了芯片框架到机身框架的向量转换。</p>
+
+<p>下面回到<code>inv_apply_calibration</code>函数，看看哪些地方使用了这个函数。 <br>
+1)<code>inv_set_gyro_bias</code>未使用 <br>
+2)<code>inv_build_gyro</code>。 <br>
+接着详细看一下2)的使用：</p>
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-comment">/** Record new gyro data and calls inv_execute_on_data() if previous
+* sample has not been processed.
+* @param[in] gyro Data is in device units. Length 3.
+* @param[in] timestamp Monotonic time stamp, for Android it's in nanoseconds.
+* @param[out] executed Set to 1 if data processing was done.
+* @return Returns INV_SUCCESS if successful or an error code if not.
+*/</span>
+inv_error_t inv_build_gyro(<span class="hljs-keyword">const</span> <span class="hljs-keyword">short</span> *gyro, inv_time_t timestamp)
+{
+<span class="hljs-preprocessor">#ifdef INV_PLAYBACK_DBG</span>
+    <span class="hljs-keyword">if</span> (inv_data_builder.debug_mode == RD_RECORD) {
+        <span class="hljs-keyword">int</span> type = PLAYBACK_DBG_TYPE_GYRO;
+        fwrite(&amp;type, <span class="hljs-keyword">sizeof</span>(type), <span class="hljs-number">1</span>, inv_data_builder.file);
+        fwrite(gyro, <span class="hljs-keyword">sizeof</span>(gyro[<span class="hljs-number">0</span>]), <span class="hljs-number">3</span>, inv_data_builder.file);
+        fwrite(&amp;timestamp, <span class="hljs-keyword">sizeof</span>(timestamp), <span class="hljs-number">1</span>, inv_data_builder.file);
+    }
+<span class="hljs-preprocessor">#endif</span>
+
+    <span class="hljs-built_in">memcpy</span>(sensors.gyro.raw, gyro, <span class="hljs-number">3</span> * <span class="hljs-keyword">sizeof</span>(<span class="hljs-keyword">short</span>));
+    sensors.gyro.status |= INV_NEW_DATA | INV_RAW_DATA | INV_SENSOR_ON;
+    sensors.gyro.timestamp_prev = sensors.gyro.timestamp;
+    sensors.gyro.timestamp = timestamp;
+    inv_apply_calibration(&amp;sensors.gyro, inv_data_builder.save.gyro_bias);
+
+    <span class="hljs-keyword">return</span> INV_SUCCESS;
+}</code></pre>
+
+<p>可以看出这个函数的第一个参数，一个const *short 类型的变量就是数据的来源。 <br>
+接着看哪里使用了<code>inv_build_gyro</code>函数：</p>
+
+<p>正是MPLSensor类的buildMpuEvent成员函数，函数中有语句 <br>
+<code>inv_build_gyro(mCachedGyroData, mSensorTimestamp);</code> <br>
+<code>mCachedGyroData</code>是来源。 <br>
+往上翻，看到</p>
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt; <span class="hljs-number">3</span>; i++) {
+        <span class="hljs-keyword">if</span> (mLocalSensorMask &amp; INV_THREE_AXIS_ACCEL) {
+            mCachedAccelData[i] = *((<span class="hljs-keyword">short</span> *) (rdata + i * <span class="hljs-number">2</span>));
+        }
+        <span class="hljs-keyword">if</span> (mLocalSensorMask &amp; INV_THREE_AXIS_GYRO) {
+            mCachedGyroData[i] = *((<span class="hljs-keyword">short</span> *) (rdata + i * <span class="hljs-number">2</span> +
+                ((mLocalSensorMask &amp; INV_THREE_AXIS_ACCEL)? <span class="hljs-number">6</span>: <span class="hljs-number">0</span>)));
+        }
+        <span class="hljs-keyword">if</span> ((mLocalSensorMask &amp; INV_THREE_AXIS_COMPASS)
+                &amp;&amp; mCompassSensor-&gt;isIntegrated()) {
+            mCachedCompassData[i] =
+                *((<span class="hljs-keyword">short</span> *)(rdata + i * <span class="hljs-number">2</span> + <span class="hljs-number">6</span> * (sensors - <span class="hljs-number">1</span>)));
+        }
+    }</code></pre>
+
+<p>mCacheGyroData从rdata中来，继续看rdata的来源。 <br>
+rdata的实际空间是一个字符数组，如下定义</p>
+
+<pre class="prettyprint"><code class=" hljs scss"><span class="hljs-value">char</span> mIIOBuffer<span class="hljs-attr_selector">[(16 + 8 * 3 + 8) * IIO_BUFFER_LENGTH]</span>;<span class="hljs-comment">//IIO_BUFFER_LENGTH的长度为480</span></code></pre>
+
+<p>rdata是使用了read从设备文件中读进，其中的<code>nbyte=(8 * sensors + 8) * 1;//sensors是传感器的数量</code></p>
+
+<pre class="prettyprint"><code class=" hljs bash">ssize_t rsize = <span class="hljs-built_in">read</span>(iio_fd, rdata, nbyte);</code></pre>
+
+<p>而<code>iio_fd = open(iio_device_node, O_RDONLY);</code>，是<code>iio_device_node</code>文件的一个文件句柄。这句打开文件的语句在<code>enable_iio_sysfs</code>函数中，并被MPLSensor的构造函数所调用。 <br>
+下面看看iio_device_node是什么：<code>inv_get_iio_device_node(iio_device_node);</code>获得了这个字符串，进去<code>inv_get_iio_device_node</code>看一下：</p>
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-comment">/** 
+ *  @brief  return iio device node. If iio is not initialized, return false.
+ *          So the return must be checked to make sure the numeber is valid.
+ *  @unsigned char *name: This should be array big enough to hold the device
+ *           node. It should be zeroed before calling this function.
+ *           Or it could have unpredicable result.
+ */</span>
+inv_error_t inv_get_iio_device_node(<span class="hljs-keyword">const</span> <span class="hljs-keyword">char</span> *name)
+{
+    <span class="hljs-keyword">if</span> (process_sysfs_request(CMD_GET_DEVICE_NODE, (<span class="hljs-keyword">char</span> *)name) &lt; <span class="hljs-number">0</span>)
+        <span class="hljs-keyword">return</span> INV_ERROR_NOT_OPENED;
+    <span class="hljs-keyword">else</span>
+        <span class="hljs-keyword">return</span> INV_SUCCESS;
+}
+</code></pre>
+
+<p>重点在<code>process_sysfs_request(CMD_GET_DEVICE_NODE, (char *)name)</code>中 <br>
+进入<code>process_sysfs_request</code>中，可以看到：</p>
+
+<pre class="prettyprint"><code class="language-c hljs "><span class="hljs-keyword">case</span> CMD_GET_DEVICE_NODE:
+        <span class="hljs-comment">//data就是传入的参数name</span>
+        <span class="hljs-built_in">sprintf</span>(data, <span class="hljs-string">"/dev/iio:device%d"</span>, iio_dev_num);
+        <span class="hljs-keyword">break</span>;</code></pre>
+
+<p>就是把iio_dev_num连接在/dev/iio:device后面了，<code>iio_dev_num</code>是通过一个<code>find_type_by_name</code>函数获取的，<code>find_type_by_name</code>怎么运作的不在深究。</p>
+
+<p>有点太过深入了，我们回到<code>buildMpuEvent</code>成员函数中，我们说这个函数调用了 <br>
+<code>inv_build_gyro(mCachedGyroData, mSensorTimestamp);</code> <br>
+来获取数据，那么哪里调用了<code>buildMpuEvent</code>函数呢：</p>
+
+<p>在<code>sensors_poll_context_t::pollEvents()</code>中我们找到了这样一句<code>((MPLSensor*) mSensor)-&gt;buildMpuEvent();</code></p>
+
+<p>而<code>pollEvents</code>被<code>poll__poll</code>所调用，然后<code>poll__poll</code>被<code>open_sensors</code>处理到一个<code>sensors_poll_context_t</code>类型的dev中： <br>
+<code>dev-&gt;device.poll= poll__poll;</code></p>
+
+<p>这个函数最终会被SensorDevice类所使用，最终SensorService会使用SensorDevice类进行数据的监听和获取。 <br>
+到此，整个流程逻辑分析完毕，从SensorDevice出发又回到了SensorDevice。 <br>
+<img src="http://img.blog.csdn.net/20160705150412232" alt="这里写图片描述" title=""></p></div></body>
+</html>
