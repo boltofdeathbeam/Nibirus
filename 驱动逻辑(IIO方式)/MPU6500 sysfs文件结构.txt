@@ -1,0 +1,193 @@
+temperature (Read-only)
+--Read temperature data directly from the temperature register.
+温度（只读）
+--直接从温度寄存器中读温度数据
+
+sampling_frequency (Read/write)
+--Configure the ADC sampling rate and FIFO output rate.
+采样频率（读/写）
+--配置ADC的采样率和FIFO输出率
+
+sampling_frequency_available(read-only)
+--show commonly used frequency
+可用采样频率（只读）
+--显示常用频率
+
+clock_source (Read-only)
+--Check which clock-source is used by the chip.
+时钟资源（只读）
+--检测哪个时钟源被芯片所使用
+
+power_state (Read/write)
+--turn on/off the power supply
+电源状态（读/写）
+--开/关电源供应
+
+self_test (read-only)
+--read this entry trigger self test. The return value is D.
+自检（只读）
+--读此条触发器自检，返回值是D
+D is the success/fail.
+D是成功/失败
+For different chip, the result is different for success/fail.
+不同的芯片，显示成功失败的结果不同
+1 means success 0 means fail. The LSB of D is for gyro; the bit
+next to LSB of D is for accel. The bit 2 of D is for compass result.
+
+key (read-only)
+--show the key value of this driver. Used by MPL.
+秘钥（只读）
+--显示驱动的秘钥值。被MPL所使用
+
+gyro_matrix (read-only)
+--show the orientation matrix obtained from the board file.
+陀螺仪矩阵（只读）
+--显示方向矩阵，来自管理文件
+
+MPU-6050 and MPU-6500
+---------------------
+MPU-6050 and MPU-6500 have all sysfs files above. 
+In addition, it has the files below:
+MPU6050 和 MPU6500 有上面所有的sysfs文件，并且添加了下边的文件：
+
+gyro_enable (read/write)
+--enable/disable gyro functionality. Affects raw_gyro. Turning this off this 
+  will shut down gyro and save power.
+陀螺仪时能（读/写）
+--使能/禁用 陀螺仪功能。影响raw_gyro数据。关闭这个回关闭陀螺仪并节省电力
+
+accl_enable (read/write)
+--enable/disable accelerometer functionality. Affects raw_accl.
+Turning this off this will shut down accel and save power.
+加速度计使能，和陀螺仪类似
+
+firmware_loaded (read/write)
+--Flag indicating the whether firmware is loaded or not in the DMP engine.
+0 means no firmware loaded. 1 means firmware is already loaded . This
+flag can only be written as 0. It internally updates to 1.
+固件装载（读/写）
+--标志固件是否装载了DMP引擎。0表示没有固件装载，1表示固件已装载。标志只能被写0，内部回自动更新到1
+
+dmp_on(read/write)
+--This entry controls whether to run DMP or not. 
+Write 1 to enable DMP and write 0 to disable dmp.
+Please note that firmware_loaded must be 1 in order to enable DMP.
+DMP开关（读/写）
+--这项控制是否运行DMP。1使能，0禁用。请注意firmware_loaded是否为1，在使能DMP的时候
+
+dmp_int_on(read/write)
+--This entry controls whether dmp interrupt is on/off. 
+Please note that firmware_loaded must be 1.
+Also, we'd like to remind you that it is sometimes advantageous to 
+turn interrupts off while the DMP is running.
+DMP中断开关（读/写）
+--这项控制了DMP中断是否开启。注意firmware_loaded是否为1.同时，我们提醒你，有时候在DMP运行的时候关闭中断是有好处的。
+
+dmp_output_rate
+--control dmp output rate when dmp is on.
+DMP输出频率
+--控制DMP输出率当DMP开启
+
+dmp_event_int_on(read/write)
+--This entry controls whether dmp event interrupt is on/off. 
+Please note that turning this on will turn off the data interrupt. 
+Interrupts will be generated only when events occur. 
+This is useful for saving power when the system is waiting for a special event 
+to wake up.
+DMP事件中断开关（读/写）
+--这项控制DMP事件中断是否打开。
+注意这个运行的时候会关闭数据（data）中断。中断只会在有事件发生的时候产生。
+在等待一个特殊事件来唤醒系统的时候，这个对节省电力很有用。
+
+dmp_firmware (write only binary file)
+--DMP firmware code is loaded into this entry. 
+If loading is successful, the firmware_loaded flag will be updated to 1. 
+In order to load new firmware, the firmware_loaded flag must be first set to 0.
+DMP固件（只写，二进制文件）
+--DMP固件码将会被加载到这里。
+如果加载成功，fiemware_loaded将会被更新到1.为了加载一个新的固件，firmware_loaded标志必须先置0
+
+accel_matrix
+--orientation matrix for accelerometer.
+加速计矩阵
+--加速计的方向矩阵
+
+quaternion_on
+--Turn on/off quaterniion data output. DMP is required for this feature.
+四元数开关
+--四元数数据输出开关。DMP需要这个功能
+
+
+pedometer_time
+pedometer_steps,
+--Pedometer related entries
+计步器相关项
+
+event_tap
+event_display_orientation
+event_accel_motion
+event_smd
+--Event related entries. 
+事件相关项
+Please poll these entries to read their values. Direct reads will yield 
+meaningless results.
+请用轮询的方式读这些值，直接读取数据可能回得到无意义的结果
+Further details are provided in the DMP Events section of this README.
+更多细节在DMP部分可以看到
+
+tap_on
+--Controls tap function of DMP
+
+tap_time
+tap_min_count
+tap_threshold
+--Tap related entries. Controls various parameters of tap function.
+Tap各种功能
+
+display_orientation_on
+--Turn on/off display orientation function of DMP.
+DMP的展示方向功能
+
+smd_enable
+enable SMD(Significant Motion Detection) detection.
+显著运动检测
+
+smd_threshold
+This set the threshold of the motion when SMD start to be triggered. The
+value is in acclerometer counts. 
+设置运动阀值当SMD开始触发，单位是加速计单位。
+
+smd_delay_threshold
+This sets the threshold of time after which SMD can be triggered.
+The value is in seconds.
+时延阀值
+
+smd_delay_threshold2
+This sets the threshold of time during which SMD can be triggered (after the
+smd_delay_threshold timer has expired). 
+The value is in seconds.
+时延阀值2
+
+
+Low power accel motion interrupt related settings.
+低电量加速运动中断相关设置。
+if motion_lpa_on is set, this will disable all engines except accel. Accel will
+enter low power mode and the whole chip will be turned on/off at specific frequency.
+当motion_lpa_on被设置了，这个回禁用全部的引擎除了加速计。加速计会进入一个低电模式并且全部的芯片会开/关在一个特定的频率
+-----------------------------------------------------------------------------
+motion_lpa_duration
+--set motion duration. in ms. This means filtered out all the motino interrupts
+  during this period.
+低电模式持续时间。单位是ms。在此期间所有的运动中断都会被过滤出去。
+
+motion_lpa_threshold
+--set motion threshold. in mg. The maximum is 1020mg and resolution is 32mg.
+运动阀值。单位mg。最大是1020mg并解决方案是32mg
+
+motion_lpa_on
+--turn on/off motion function.
+开关lpa模式
+
+motion_lpa_freq
+--motion lpa frequency. which determines power on/off frequency.
+低电模式频率。确定了电量开关频率。
